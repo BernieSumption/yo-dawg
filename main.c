@@ -4,7 +4,7 @@
 #include <ctype.h>
 #include <assert.h>
 
-const char * DICT = "/Users/bernie/Documents/code-experiments/c-dawg/dawg/wordlist.txt";
+const char * DICT = "/Users/bernie/Documents/code-experiments/yo-dawg/wordlist.txt";
 
 #define WORD_LIMIT 16
 #define WORD_BUFF_SIZE WORD_LIMIT + 1
@@ -14,10 +14,10 @@ const char * DICT = "/Users/bernie/Documents/code-experiments/c-dawg/dawg/wordli
 
 struct node {
 	int id;
-	//	int parents;
 	unsigned char is_word;
 	unsigned char value;
-	char child_count;
+	unsigned char child_count;
+	unsigned char leaf_distance; // smallest number of nodes between this node and a leaf
 	struct node * trie_parent;
 	struct node * children[LETTER_COUNT];
 };
@@ -29,7 +29,7 @@ int main (int argc, const char * argv[]) {
 	
 	FILE * dict = fopen(DICT, "r");
 	struct node * root = dawg_from_word_file(dict);
-	word_file_from_dawg(root, stdout);
+//	word_file_from_dawg(root, stdout);
 	
 }
 
@@ -37,9 +37,11 @@ int main (int argc, const char * argv[]) {
 // implementation
 //
 
-// free(void*)? What's free(void*)? My garbage colletion algorithm is exit(int)
+// free(void*)? What's free(void*)? My garbage colletion algorithm is exit(int) 
 
-int _nodes_created = 0;
+#define set0(X) memset(X, 0, sizeof(X))
+
+int _nodes_created;
 
 struct node * _new_node(unsigned char value, struct node * parent) {
 	struct node * n = calloc(1, sizeof(struct node));
@@ -52,11 +54,9 @@ struct node * _new_node(unsigned char value, struct node * parent) {
 #define char_to_index(c) c - 'a'
 #define index_to_char(c) 'a' + c
 
-char _last_word_added[WORD_BUFF_SIZE];
-
-void _add_word_to_dawg(struct node * root, char * word) {
-	if (_last_word_added[0] && strcmp(word, _last_word_added) < 0) {
-		fprintf(stderr, "Fatal error: words out of alphabetical order: \"%s\" then \"%s\"\n", _last_word_added, word);
+void _add_word_to_dawg(struct node * root, char * word, char * last_word) {
+	if (last_word[0] && strcmp(word, last_word) < 0) {
+		fprintf(stderr, "Fatal error: words out of alphabetical order: \"%s\" then \"%s\"\n", last_word, word);
 		exit(1);
 	}
 	int len = strlen(word);
@@ -65,49 +65,131 @@ void _add_word_to_dawg(struct node * root, char * word) {
 		int index = char_to_index(word[i]);
 		if (!node->children[index]) {
 			node->children[index] = _new_node(index, node);
+			node->child_count++;
 		}
 		node = node->children[index];
+		if (node->leaf_distance < len - i - 1) {
+			node->leaf_distance = len - i - 1;
+		}
 	}
 	node->is_word = 1;
-	strcpy(_last_word_added, word);
+	strcpy(last_word, word);
 }
 
-void _compute_depths(struct node * node) {
-	if (node->child_count == 0) {
-//		node->
+struct _node_collection {
+	// counts[X] stores count of nodes with leaf_distance == X
+	int counts[WORD_LIMIT];
+	// offset[X] stores i+1 where i is the position in 'nodes' of the last node with leaf_distance == X
+	int offsets[WORD_LIMIT];
+	struct node ** nodes;
+};
+
+void _count_nodes_by_leaf_distance(struct node * node, struct _node_collection * context) {
+	context->counts[node->leaf_distance] ++;
+	if (node->child_count > 0) {
+		for (int i=0; i<LETTER_COUNT; i++) {
+			if (node->children[i]) {
+				_count_nodes_by_leaf_distance(node->children[i], context);
+			}
+		}
 	}
+}
+void _collect_nodes_by_leaf_distance(struct node * node, struct _node_collection * context) {
+	int relative = context->counts[node->leaf_distance] ++;
+	int base = node->leaf_distance == 0 ? 0 : context->offsets[node->leaf_distance - 1];
+	int pos = relative + base;
+//	if (pos >= _nodes_created) {
+//		fprintf(stderr, "%d < %d == %d\n", pos, _nodes_created, pos <= _nodes_created);
+//	}
+	assert(pos <= _nodes_created);
+	context->nodes[base + relative] = node;
+	if (node->child_count > 0) {
+		for (int i=0; i<LETTER_COUNT; i++) {
+			if (node->children[i]) {
+				_collect_nodes_by_leaf_distance(node->children[i], context);
+			}
+		}
+	}
+}
+
+// optimise trie into DAWG. Summary of process:
+// 1. First take the set of all leaf nodes
+// 2. Within this set, find sets of identical nodes. Two nodes are considered
+//    identical if they have the same value and the same set of child nodes
+// 3. Merge sets of identical nodes into one node by nominating one node as the
+//    sole node, then rewiring the parents of the other nodes to point to the sole node
+// 4. Repeat this process with nodes 1 level up from leaves, then 2 levels up etc until
+//    the root is reached
+void _combine_suffixes(struct node * root) {
+	
+	struct node * nodes_by_depth[_nodes_created];
+	set0(nodes_by_depth);
+	
+	struct _node_collection collection;
+	memset(&collection, 0, sizeof(collection));
+	collection.nodes = nodes_by_depth;
+	
+	fprintf(stderr, "1\n");
+	
+	_count_nodes_by_leaf_distance(root, &collection);
+	int offset = 0;
+	for (int i=0; i<WORD_LIMIT; i++) {
+		offset += collection.counts[i];
+		collection.offsets[i] = offset;
+		collection.counts[i] = 0;
+	}
+	_collect_nodes_by_leaf_distance(root, &collection);
+	
+	fprintf(stderr, "%d == %d\n", collection.counts	[4], _nodes_created);
+	assert(collection.offsets[15] == _nodes_created);
+	
+	fprintf(stderr, "%d nodes\n", _nodes_created);
+	fprintf(stderr, "%d leaves\n", collection.counts[0]);
 }
 
 struct node * dawg_from_word_file(FILE *dict) {
-	_last_word_added[0] = '\0';
-	char line[1024];
+	assert(dict);
+	
+	// read file line by line, adding words into a trie
+	_nodes_created = 0;
+	char last_word[WORD_BUFF_SIZE];
+	set0(last_word);
+	char word[256];
+	set0(word);
+	
 	struct node * root = _new_node(0, 0);
 	int lineNo = 0;
-	while (fgets(line, sizeof(line), dict)) {
-		if (strlen(line) >= sizeof(line) - 1) {
-			fprintf(stderr, "Fatal error: line number %d is crazy-long. Are you *trying* to overflow my buffers?", lineNo);
-			exit(1);
-		}
-		lineNo++;
-		for (int i=0; line[i]; i++) {
-			if (isspace(line[i])) {
-				line[i] = '\0';
-			} else if (isupper(line[i])) {
-				line[i] = tolower(line[i]);
-			} else if (!islower(line[i])) {
-				fprintf(stderr, "Skipping line %d: \"%s\". Illegal character '%c' at position %d\n", lineNo, line, line[i], i);
-			}
-		}
-		if (strlen(line) > WORD_LIMIT) {
-			fprintf(stderr, "Skipping line %d: \"%s\". Word is longer than %d characters\n", lineNo, line, WORD_LIMIT);
+	fgets(word, sizeof(word), dict);
+	while (fgets(word, sizeof(word), dict)) {
+		if (word[strlen(word) - 1] != '\n') { // word was too long
+			fprintf(stderr, "Skipping line %d. Word is longer than %d characters\n", lineNo, WORD_LIMIT);
+			do {
+				fgets(word, sizeof(word), dict);
+			} while (word[strlen(word) - 1] != '\n');
 			continue;
 		}
-		if (strlen(line) > 16) {
-			fprintf(stderr, "bad: %s\n", line);
+		lineNo++;
+		for (int i=0; word[i]; i++) {
+			if (isspace(word[i])) {
+				word[i] = '\0';
+			} else if (isupper(word[i])) {
+				word[i] = tolower(word[i]);
+			} else if (!islower(word[i])) {
+				fprintf(stderr, "Skipping line %d: \"%s\". Illegal character '%c' at position %d\n", lineNo, word, word[i], i);
+			}
+		}
+		if (strlen(word) > WORD_LIMIT) {
+			fprintf(stderr, "Skipping line %d: \"%s\". Word is longer than %d characters\n", lineNo, word, WORD_LIMIT);
+			continue;
+		}
+		if (strlen(word) > 16) {
+			fprintf(stderr, "bad: %s\n", word);
 			exit(1);
 		}
-		_add_word_to_dawg(root, line);
+		_add_word_to_dawg(root, word, last_word);
 	}
+	
+	_combine_suffixes(root);
 	
 	return root;
 	

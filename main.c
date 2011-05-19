@@ -17,7 +17,9 @@ struct node {
 	unsigned char is_word;
 	unsigned char value;
 	unsigned char child_count;
+	unsigned char visited;
 	unsigned char leaf_distance; // smallest number of nodes between this node and a leaf
+	unsigned int hashcode;
 	struct node * trie_parent;
 	struct node * children[LETTER_COUNT];
 };
@@ -25,27 +27,88 @@ struct node {
 struct node * dawg_from_word_file(FILE *dict);
 void word_file_from_dawg(struct node * root, FILE * out);
 
+void __do_stats(struct node * root, int * counts) {
+	counts[root->child_count]++;
+	for (int i=0; i<LETTER_COUNT; i++) {
+		if (root->children[i]) {
+			__do_stats(root->children[i], counts);
+		}
+	}
+}
+
 int main (int argc, const char * argv[]) {
 	
 	FILE * dict = fopen(DICT, "r");
 	struct node * root = dawg_from_word_file(dict);
-//	word_file_from_dawg(root, stdout);
+	word_file_from_dawg(root, stdout);
 	
+	int counts[LETTER_COUNT];
+	memset(&counts, 0, sizeof(counts));
+	
+	__do_stats(root, counts);
+	
+	for (int i=0; i<LETTER_COUNT; i++) {
+		fprintf(stderr, "%d: %d\n", i, counts[i]);
+	}
+	
+	return 0;
 }
 
 //
 // implementation
 //
 
-// free(void*)? What's free(void*)? My garbage colletion algorithm is exit(int) 
-
 #define set0(X) memset(X, 0, sizeof(X))
 
-int _nodes_created;
 
-struct node * _new_node(unsigned char value, struct node * parent) {
+
+#define nodes_are_equal(a, b) (\
+a->hashcode == b->hashcode && \
+a->value == b->value && \
+a->is_word == b->is_word && \
+memcmp(a->children, b->children, LETTER_COUNT * (int) sizeof(void*)) == 0)
+
+
+int _node_hashcode(struct node * node) {
+	int hash = node->value ^ (node->value << 5) ^ (node->value << 10) ^ (node->value << 15) ^ (node->value << 20) ^ (node->value << 25);
+	hash += node->is_word;
+	
+	int * children_as_ints = (int*) node->children;
+	int len = (sizeof(void*) * LETTER_COUNT) / sizeof(int); // number of integers worth of data in node.children
+	for (int i=0; i<len; i++) {
+		int val = children_as_ints[i];
+		hash ^= val;
+		hash = (hash << 5) | ((hash & 0xF8000000) >> 27); // 5 bit circular shift
+	}
+	
+	return hash;
+}
+
+void _unvisit_all_nodes(struct node * root) {
+	root->visited = 0;
+	for (int i=0; i<LETTER_COUNT; i++) {
+		if (root->children[i]) {
+			_unvisit_all_nodes(root->children[i]);
+		}
+	}
+}
+
+// variables used in the creation of a dawg (using this instead of global variables makes the
+// functions in this file reentrant and thread safe)
+struct _dawg_context {
+	
+	int nodes_created;
+	
+	// counts[X] stores count of nodes with leaf_distance == X
+	int counts[WORD_LIMIT];
+	// offset[X] stores i+1 where i is the position in 'nodes' of the last node with leaf_distance == X
+	int offsets[WORD_LIMIT];
+	struct node ** nodes;
+};
+
+struct node * _new_node(unsigned char value, struct node * parent, struct _dawg_context * context) {
 	struct node * n = calloc(1, sizeof(struct node));
-	n->id = _nodes_created++;
+	n->id = context->nodes_created++;
 	n->value = value;
 	n->trie_parent = parent;
 	return n;
@@ -54,7 +117,7 @@ struct node * _new_node(unsigned char value, struct node * parent) {
 #define char_to_index(c) c - 'a'
 #define index_to_char(c) 'a' + c
 
-void _add_word_to_dawg(struct node * root, char * word, char * last_word) {
+void _add_word_to_dawg(struct node * root, char * word, char * last_word, struct _dawg_context * context) {
 	if (last_word[0] && strcmp(word, last_word) < 0) {
 		fprintf(stderr, "Fatal error: words out of alphabetical order: \"%s\" then \"%s\"\n", last_word, word);
 		exit(1);
@@ -64,7 +127,7 @@ void _add_word_to_dawg(struct node * root, char * word, char * last_word) {
 	for (int i=0; i<len; i++) {
 		int index = char_to_index(word[i]);
 		if (!node->children[index]) {
-			node->children[index] = _new_node(index, node);
+			node->children[index] = _new_node(index, node, context);
 			node->child_count++;
 		}
 		node = node->children[index];
@@ -76,16 +139,9 @@ void _add_word_to_dawg(struct node * root, char * word, char * last_word) {
 	strcpy(last_word, word);
 }
 
-struct _node_collection {
-	// counts[X] stores count of nodes with leaf_distance == X
-	int counts[WORD_LIMIT];
-	// offset[X] stores i+1 where i is the position in 'nodes' of the last node with leaf_distance == X
-	int offsets[WORD_LIMIT];
-	struct node ** nodes;
-};
-
-void _count_nodes_by_leaf_distance(struct node * node, struct _node_collection * context) {
+void _count_nodes_by_leaf_distance(struct node * node, struct _dawg_context * context) {
 	context->counts[node->leaf_distance] ++;
+	node->hashcode = _node_hashcode(node);
 	if (node->child_count > 0) {
 		for (int i=0; i<LETTER_COUNT; i++) {
 			if (node->children[i]) {
@@ -94,14 +150,11 @@ void _count_nodes_by_leaf_distance(struct node * node, struct _node_collection *
 		}
 	}
 }
-void _collect_nodes_by_leaf_distance(struct node * node, struct _node_collection * context) {
+void _collect_nodes_by_leaf_distance(struct node * node, struct _dawg_context * context) {
 	int relative = context->counts[node->leaf_distance] ++;
 	int base = node->leaf_distance == 0 ? 0 : context->offsets[node->leaf_distance - 1];
 	int pos = relative + base;
-//	if (pos >= _nodes_created) {
-//		fprintf(stderr, "%d < %d == %d\n", pos, _nodes_created, pos <= _nodes_created);
-//	}
-	assert(pos <= _nodes_created);
+	assert(pos <= context->nodes_created);
 	context->nodes[base + relative] = node;
 	if (node->child_count > 0) {
 		for (int i=0; i<LETTER_COUNT; i++) {
@@ -112,7 +165,7 @@ void _collect_nodes_by_leaf_distance(struct node * node, struct _node_collection
 	}
 }
 
-// optimise trie into DAWG. Summary of process:
+// Summary of process:
 // 1. First take the set of all leaf nodes
 // 2. Within this set, find sets of identical nodes. Two nodes are considered
 //    identical if they have the same value and the same set of child nodes
@@ -120,46 +173,82 @@ void _collect_nodes_by_leaf_distance(struct node * node, struct _node_collection
 //    sole node, then rewiring the parents of the other nodes to point to the sole node
 // 4. Repeat this process with nodes 1 level up from leaves, then 2 levels up etc until
 //    the root is reached
-void _combine_suffixes(struct node * root) {
+void _convert_trie_to_dawg(struct node * root, struct _dawg_context * context) {
 	
-	struct node * nodes_by_depth[_nodes_created];
+	// sort nodes by distance from leaf
+	struct node ** nodes_by_depth = calloc(context->nodes_created, sizeof(struct node*));
 	set0(nodes_by_depth);
+	context->nodes = nodes_by_depth;
 	
-	struct _node_collection collection;
-	memset(&collection, 0, sizeof(collection));
-	collection.nodes = nodes_by_depth;
-	
-	fprintf(stderr, "1\n");
-	
-	_count_nodes_by_leaf_distance(root, &collection);
+	_count_nodes_by_leaf_distance(root, context);
 	int offset = 0;
 	for (int i=0; i<WORD_LIMIT; i++) {
-		offset += collection.counts[i];
-		collection.offsets[i] = offset;
-		collection.counts[i] = 0;
+		offset += context->counts[i];
+		context->offsets[i] = offset;
+		context->counts[i] = 0;
 	}
-	_collect_nodes_by_leaf_distance(root, &collection);
+	_collect_nodes_by_leaf_distance(root, context);
+	assert(context->offsets[15] == context->nodes_created);
 	
-	fprintf(stderr, "%d == %d\n", collection.counts	[4], _nodes_created);
-	assert(collection.offsets[15] == _nodes_created);
+	int table_size = context->nodes_created * 1.5;
+	struct node ** hash_table = calloc(table_size, sizeof(struct node*));
 	
-	fprintf(stderr, "%d nodes\n", _nodes_created);
-	fprintf(stderr, "%d leaves\n", collection.counts[0]);
+	int merge = 0;
+	
+	// apply merging process
+	for (int i=0; i<WORD_LIMIT; i++) {
+		int from = i == 0 ? 0 : context->offsets[i-1];
+		int to = context->offsets[i];
+		for (int j=from; j<to; j++) {
+			struct node * node = context->nodes[j];
+			
+			// find node sole node, if one exists already
+			struct node * sole_node = 0;
+			int pos = node->hashcode % table_size;
+			int tmp = 0;
+			while (hash_table[pos]) {
+				if (nodes_are_equal(node, hash_table[pos])) {
+					sole_node = hash_table[pos];
+					break;
+				}
+				pos = (pos + 1) % table_size;
+				tmp++;
+			}
+			if (sole_node) {
+				// merge this node with the sole node
+				assert(node != sole_node);
+				assert(node->trie_parent->children[node->value] == node);
+				node->trie_parent->children[node->value] = sole_node;
+				free(node);
+				merge++;
+			} else {
+				// consider this the sole node
+				hash_table[pos] = node;
+			}
+		}
+	}
+	
+	fprintf(stderr, "merged %d of %d\n", merge, context->nodes_created);
+	
+	free(hash_table);
+	free(nodes_by_depth);
+	context->nodes = 0;
 }
 
 struct node * dawg_from_word_file(FILE *dict) {
 	assert(dict);
 	
+	struct _dawg_context context;
+	memset(&context, 0, sizeof(context));
+	
 	// read file line by line, adding words into a trie
-	_nodes_created = 0;
 	char last_word[WORD_BUFF_SIZE];
 	set0(last_word);
 	char word[256];
 	set0(word);
 	
-	struct node * root = _new_node(0, 0);
+	struct node * root = _new_node(0, 0, &context);
 	int lineNo = 0;
-	fgets(word, sizeof(word), dict);
 	while (fgets(word, sizeof(word), dict)) {
 		if (word[strlen(word) - 1] != '\n') { // word was too long
 			fprintf(stderr, "Skipping line %d. Word is longer than %d characters\n", lineNo, WORD_LIMIT);
@@ -186,10 +275,13 @@ struct node * dawg_from_word_file(FILE *dict) {
 			fprintf(stderr, "bad: %s\n", word);
 			exit(1);
 		}
-		_add_word_to_dawg(root, word, last_word);
+		_add_word_to_dawg(root, word, last_word, &context);
 	}
 	
-	_combine_suffixes(root);
+	_convert_trie_to_dawg(root, &context);
+	
+	
+	_node_hashcode(root->children[2]);
 	
 	return root;
 	

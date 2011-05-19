@@ -4,70 +4,17 @@
 #include <ctype.h>
 #include <assert.h>
 
-const char * DICT = "/Users/bernie/Documents/code-experiments/yo-dawg/wordlist.txt";
+#include "mutable-dawg.h"
 
-#define WORD_LIMIT 16
 #define WORD_BUFF_SIZE WORD_LIMIT + 1
-#define LETTER_COUNT 26
-
-
-
-struct node {
-	int id;
-	unsigned char is_word;
-	unsigned char value;
-	unsigned char child_count;
-	unsigned char visited;
-	unsigned char leaf_distance; // smallest number of nodes between this node and a leaf
-	unsigned int hashcode;
-	struct node * trie_parent;
-	struct node * children[LETTER_COUNT];
-};
-
-struct node * dawg_from_word_file(FILE *dict);
-void word_file_from_dawg(struct node * root, FILE * out);
-
-void __do_stats(struct node * root, int * counts) {
-	counts[root->child_count]++;
-	for (int i=0; i<LETTER_COUNT; i++) {
-		if (root->children[i]) {
-			__do_stats(root->children[i], counts);
-		}
-	}
-}
-
-int main (int argc, const char * argv[]) {
-	
-	FILE * dict = fopen(DICT, "r");
-	struct node * root = dawg_from_word_file(dict);
-	word_file_from_dawg(root, stdout);
-	
-	int counts[LETTER_COUNT];
-	memset(&counts, 0, sizeof(counts));
-	
-	__do_stats(root, counts);
-	
-	for (int i=0; i<LETTER_COUNT; i++) {
-		fprintf(stderr, "%d: %d\n", i, counts[i]);
-	}
-	
-	return 0;
-}
-
-//
-// implementation
-//
 
 #define set0(X) memset(X, 0, sizeof(X))
-
-
 
 #define nodes_are_equal(a, b) (\
 a->hashcode == b->hashcode && \
 a->value == b->value && \
 a->is_word == b->is_word && \
 memcmp(a->children, b->children, LETTER_COUNT * (int) sizeof(void*)) == 0)
-
 
 int _node_hashcode(struct node * node) {
 	int hash = node->value ^ (node->value << 5) ^ (node->value << 10) ^ (node->value << 15) ^ (node->value << 20) ^ (node->value << 25);
@@ -113,9 +60,6 @@ struct node * _new_node(unsigned char value, struct node * parent, struct _dawg_
 	n->trie_parent = parent;
 	return n;
 }
-
-#define char_to_index(c) c - 'a'
-#define index_to_char(c) 'a' + c
 
 void _add_word_to_dawg(struct node * root, char * word, char * last_word, struct _dawg_context * context) {
 	if (last_word[0] && strcmp(word, last_word) < 0) {

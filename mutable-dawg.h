@@ -4,6 +4,8 @@
  *  Functions for building Directed Acyclic Word Graphs
  */
 
+#ifndef mutable_dawg_h_included
+#define mutable_dawg_h_included
 
 // maximum length of words
 #ifndef WORD_LIMIT
@@ -26,7 +28,7 @@
 #define index_to_char(c) 'a' + c
 #endif
 
-//
+
 struct node {
 	int id;
 	unsigned char is_word;
@@ -41,4 +43,7 @@ struct node {
 
 struct node * dawg_from_word_file(FILE *dict);
 void word_file_from_dawg(struct node * root, FILE * out);
+void unvisit_all_nodes(struct node * root);
+
+#endif
 

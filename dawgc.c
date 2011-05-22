@@ -5,6 +5,7 @@
 #include <assert.h>
 
 #include "mutable-dawg.h"
+#include "dawg-viz.h"
 
 void usage(const char * execName) {
 	fprintf(stderr, "Directed Acyclic Word Graph compiler\n\n");
@@ -31,6 +32,12 @@ int main (int argc, const char * argv[]) {
 	if (strcmp("-c", cmd) == 0 || strcmp("--compile", cmd) == 0) {
 		struct node * root = dawg_from_word_file(stdin);
 		word_file_from_dawg(root, stdout);
+		return 0;
+	}
+	
+	if (strcmp("-g", cmd) == 0 || strcmp("--graphviz", cmd) == 0) {
+		struct node * root = dawg_from_word_file(stdin);
+		graphviz_from_dawg(root, stdout);
 		return 0;
 	}
 	

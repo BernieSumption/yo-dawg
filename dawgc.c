@@ -1,8 +1,7 @@
 #include <stdio.h>
-#include <stdlib.h>
 #include <strings.h>
-#include <ctype.h>
 #include <assert.h>
+#include <math.h>
 
 #include "mutable-dawg.h"
 #include "dawg-viz.h"
@@ -20,7 +19,65 @@ void usage(const char * execName) {
 	fprintf(stderr, "                    graph description suitable for loading into graphviz\n");
 }
 
+
+int b1 = 0;
+int b8 = 0;
+int b16 = 0;
+int b24 = 0;
+int all = 0;
+
+int _do_stats(struct node * node, int is_single_parent, int parent_id) {
+	if (node->visited) return 0;
+	node->visited = 1;
+	int children = 0;
+	all++;
+	
+	long diff = node->id - parent_id;
+	assert(diff > 0);
+	if (diff == 1) {
+		b1++;
+	} else if (diff < 64) {
+		b8++;
+	} else if (diff < 255*64) {
+		b16++;
+	} else {
+		b24++;
+	}
+	
+	if (node->child_count == 1 && is_single_parent) {
+		children++;
+	}
+	
+	for (int i=0; i<LETTER_COUNT; i++) {
+		if (node->children[i]) {
+			children += _do_stats(node->children[i], node->child_count == 1, node->id);
+		}
+	}
+	
+	return children;
+}
+
 int main (int argc, const char * argv[]) {
+	
+	FILE * in = fopen("/Users/bernie/Documents/code-experiments/yo-dawg/wordlist.txt", "r");
+	struct dawg * dawg = dawg_from_word_file(in);
+	unvisit_all_nodes(dawg->root);
+	
+	fprintf(stderr, "count: %d\n", _do_stats(dawg->root, 0, -1));
+	fprintf(stderr, "%d nodes\n", all);
+	fprintf(stderr, "%d consecutive\n", b1);
+	fprintf(stderr, "%d in 1 byte\n", b8);
+	fprintf(stderr, "%d in 2 bytes\n", b16);
+	fprintf(stderr, "%d in 3 bytes\n", b24);
+	
+	 return 0;
+	
+	/*FILE * in = fopen("/Users/bernie/Documents/code-experiments/yo-dawg/wordlist.txt", "r");
+	struct dawg * dawg = dawg_from_word_file(in);
+	write_cdawg(dawg, stdout);
+	return 0;*/
+	
+	
 	
 	if (argc != 2) {
 		usage(argv[0]);
@@ -30,14 +87,14 @@ int main (int argc, const char * argv[]) {
 	const char * cmd = argv[1];
 	
 	if (strcmp("-c", cmd) == 0 || strcmp("--compile", cmd) == 0) {
-		struct node * root = dawg_from_word_file(stdin);
-		word_file_from_dawg(root, stdout);
+		struct dawg * dawg = dawg_from_word_file(stdin);
+		write_cdawg(dawg, stdout);
 		return 0;
 	}
 	
 	if (strcmp("-g", cmd) == 0 || strcmp("--graphviz", cmd) == 0) {
-		struct node * root = dawg_from_word_file(stdin);
-		graphviz_from_dawg(root, stdout);
+		struct dawg * dawg = dawg_from_word_file(stdin);
+		graphviz_from_node(dawg->root, stdout);
 		return 0;
 	}
 	

@@ -41,9 +41,25 @@ struct node {
 	struct node * children[LETTER_COUNT];
 };
 
-struct node * dawg_from_word_file(FILE *dict);
-void word_file_from_dawg(struct node * root, FILE * out);
+struct dawg {
+	int node_count;
+	struct node * root;
+};
+
+// compile a word file into a dawg
+struct dawg * dawg_from_word_file(FILE *dict);
+
+// write a dawg to a file in the compressed binary format
+void write_cdawg(struct dawg * root, FILE * out);
+
+// decompile a DAWG into a word file
+void word_file_from_dawg(struct dawg * root, FILE * out);
+
+// mark every node->visited in a dawg or trie as 0
 void unvisit_all_nodes(struct node * root);
+
+// output a graphviz descriptor for a DAWG
+void graphviz_from_node(struct node * root, FILE * out);
 
 #endif
 

@@ -13,13 +13,15 @@ void usage(const char * execName) {
 	fprintf(stderr, " -c, --compile      Read a dictionary, one word per line in alphabetical order\n");
 	fprintf(stderr, "                    from the standard input and output a CDAWG file to the\n");
 	fprintf(stderr, "                    standard output\n");
+	fprintf(stderr, " -e, --embed        As per --compile, but output the binary data as a C source\n");
+	fprintf(stderr, "                    code containing an array literal\n");
 	fprintf(stderr, " -d, --decompile    Read a CDAWG file from the standard input and output the\n");
 	fprintf(stderr, "                    corresponding dictionary to the standard output\n");
 	fprintf(stderr, " -g, --graphviz     Read a CDAWG file from the standard input and output a\n");
 	fprintf(stderr, "                    graph description suitable for loading into graphviz\n");
 }
 
-
+/*
 int b1 = 0;
 int b8 = 0;
 int b16 = 0;
@@ -55,27 +57,34 @@ int _do_stats(struct node * node, int is_single_parent, int parent_id) {
 	}
 	
 	return children;
-}
+}*/
 
 int main (int argc, const char * argv[]) {
-	
+	/*
 	FILE * in = fopen("/Users/bernie/Documents/code-experiments/yo-dawg/wordlist.txt", "r");
 	struct dawg * dawg = dawg_from_word_file(in);
 	unvisit_all_nodes(dawg->root);
 	
-	fprintf(stderr, "count: %d\n", _do_stats(dawg->root, 0, -1));
+	_do_stats(dawg->root, 0, -1);
 	fprintf(stderr, "%d nodes\n", all);
 	fprintf(stderr, "%d consecutive\n", b1);
 	fprintf(stderr, "%d in 1 byte\n", b8);
 	fprintf(stderr, "%d in 2 bytes\n", b16);
 	fprintf(stderr, "%d in 3 bytes\n", b24);
 	
-	 return 0;
+	 return 0;*/
 	
-	/*FILE * in = fopen("/Users/bernie/Documents/code-experiments/yo-dawg/wordlist.txt", "r");
-	struct dawg * dawg = dawg_from_word_file(in);
-	write_cdawg(dawg, stdout);
-	return 0;*/
+	// decompile
+	/*FILE * in = fopen("/Users/bernie/Documents/code-experiments/yo-dawg/compiled", "r");
+	struct vertex * trie = trie_from_binary_file(in);
+	print_word_file(trie, stdout);
+	return 0;//*/
+	
+	// compile
+	/*FILE * in = fopen("/Users/bernie/Documents/code-experiments/yo-dawg/small-wordlist.txt", "r");
+	 struct dawg * dawg = dawg_from_word_file(in);
+	 binary_file_from_dawg(dawg, stdout);
+	 return 0;//*/
 	
 	
 	
@@ -88,7 +97,19 @@ int main (int argc, const char * argv[]) {
 	
 	if (strcmp("-c", cmd) == 0 || strcmp("--compile", cmd) == 0) {
 		struct dawg * dawg = dawg_from_word_file(stdin);
-		write_cdawg(dawg, stdout);
+		binary_file_from_dawg(dawg, stdout, 0);
+		return 0;
+	}
+	
+	if (strcmp("-e", cmd) == 0 || strcmp("--embed", cmd) == 0) {
+		struct dawg * dawg = dawg_from_word_file(stdin);
+		binary_file_from_dawg(dawg, stdout, 1);
+		return 0;
+	}
+	
+	if (strcmp("-d", cmd) == 0 || strcmp("--decompile", cmd) == 0) {
+		struct vertex * trie = trie_from_binary_file(stdin);
+		print_word_file(trie, stdout);
 		return 0;
 	}
 	

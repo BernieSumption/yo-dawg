@@ -5,10 +5,8 @@
 #include <assert.h>
 
 #include "mutable-dawg.h"
+#include "dawg-file-traversal.h"
 
-//
-// 
-//
 
 #define WORD_BUFF_SIZE WORD_LIMIT + 1
 
@@ -18,13 +16,13 @@
 a->hashcode == b->hashcode && \
 a->value == b->value && \
 a->is_word == b->is_word && \
-memcmp(a->children, b->children, LETTER_COUNT * (int) sizeof(void*)) == 0)
+memcmp(a->edges, b->edges, LETTER_COUNT * (int) sizeof(void*)) == 0)
 
-void _calculate_hashcode(struct node * node) {
+void _calculate_hashcode(struct vertex * node) {
 	int hash = node->value ^ (node->value << 5) ^ (node->value << 10) ^ (node->value << 15) ^ (node->value << 20) ^ (node->value << 25);
 	hash += node->is_word;
 	
-	int * children_as_ints = (int*) node->children;
+	int * children_as_ints = (int*) node->edges;
 	int len = (sizeof(void*) * LETTER_COUNT) / sizeof(int); // number of integers worth of data in node.children
 	for (int i=0; i<len; i++) {
 		int val = children_as_ints[i];
@@ -36,11 +34,11 @@ void _calculate_hashcode(struct node * node) {
 }
 
 // mark every node->visited in a dawg or trie as 0
-void unvisit_all_nodes(struct node * root) {
+void unvisit_all_nodes(struct vertex * root) {
 	root->visited = 0;
 	for (int i=0; i<LETTER_COUNT; i++) {
-		if (root->children[i]) {
-			unvisit_all_nodes(root->children[i]);
+		if (root->edges[i]) {
+			unvisit_all_nodes(root->edges[i]);
 		}
 	}
 }
@@ -49,25 +47,25 @@ void unvisit_all_nodes(struct node * root) {
 // functions in this file reentrant and thread safe)
 struct _dawg_context {
 	
-	int node_count;
+	int vertex_count;
 	int edge_count;
 	
 	// counts[X] stores count of nodes with leaf_distance == X
 	int counts[WORD_LIMIT];
 	// offset[X] stores i+1 where i is the position in 'nodes' of the last node with leaf_distance == X
 	int offsets[WORD_LIMIT];
-	struct node ** nodes;
+	struct vertex ** nodes;
 };
 
-struct node * _new_node(unsigned char value, struct node * parent, struct _dawg_context * context) {
-	struct node * n = calloc(1, sizeof(struct node));
-	n->id = context->node_count++;
+struct vertex * _new_node(unsigned char value, struct vertex * parent, struct _dawg_context * context) {
+	struct vertex * n = calloc(1, sizeof(struct vertex));
+	n->id = context->vertex_count++;
 	n->value = value;
 	n->trie_parent = parent;
 	return n;
 }
 
-void _add_word_to_dawg(struct node * root, char * word, char * last_word, struct _dawg_context * context) {
+void _add_word_to_dawg(struct vertex * root, char * word, char * last_word, struct _dawg_context * context) {
 	if (last_word[0] && strcmp(word, last_word) < 0) {
 		fprintf(stderr, "Fatal error: words out of alphabetical order: \"%s\" then \"%s\"\n", last_word, word);
 		exit(1);
@@ -76,15 +74,14 @@ void _add_word_to_dawg(struct node * root, char * word, char * last_word, struct
 	if (root->leaf_distance < len) {
 		root->leaf_distance = len;
 	}
-	struct node * node = root;
+	struct vertex * node = root;
 	for (int i=0; i<len; i++) {
 		int index = char_to_index(word[i]);
-		if (!node->children[index]) {
-			node->children[index] = _new_node(index, node, context);
-			node->child_count++;
-			context->edge_count++;
+		if (!node->edges[index]) {
+			node->edges[index] = _new_node(index, node, context);
+			node->edge_count++;
 		}
-		node = node->children[index];
+		node = node->edges[index];
 		if (node->leaf_distance < len - i - 1) {
 			node->leaf_distance = len - i - 1;
 		}
@@ -93,51 +90,32 @@ void _add_word_to_dawg(struct node * root, char * word, char * last_word, struct
 	strcpy(last_word, word);
 }
 
-void _count_nodes_by_leaf_distance(struct node * node, struct _dawg_context * context) {
+void _count_nodes_by_leaf_distance(struct vertex * node, struct _dawg_context * context) {
 	if (node->id != 0) {
 		context->counts[node->leaf_distance] ++;
 	}
 	_calculate_hashcode(node);
-	if (node->child_count > 0) {
+	if (node->edge_count > 0) {
 		for (int i=0; i<LETTER_COUNT; i++) {
-			if (node->children[i]) {
-				_count_nodes_by_leaf_distance(node->children[i], context);
+			if (node->edges[i]) {
+				_count_nodes_by_leaf_distance(node->edges[i], context);
 			}
 		}
 	}
 }
-void _collect_nodes_by_leaf_distance(struct node * node, struct _dawg_context * context) {
+void _collect_nodes_by_leaf_distance(struct vertex * node, struct _dawg_context * context) {
 	if (node->id != 0) {
 		int relative = context->counts[node->leaf_distance] ++;
 		int base = node->leaf_distance == 0 ? 0 : context->offsets[node->leaf_distance - 1];
 		int pos = relative + base;
-		assert(pos <= context->node_count);
+		assert(pos <= context->vertex_count);
 		context->nodes[base + relative] = node;
 	}
-	if (node->child_count > 0) {
+	if (node->edge_count > 0) {
 		for (int i=0; i<LETTER_COUNT; i++) {
-			if (node->children[i]) {
-				_collect_nodes_by_leaf_distance(node->children[i], context);
+			if (node->edges[i]) {
+				_collect_nodes_by_leaf_distance(node->edges[i], context);
 			}
-		}
-	}
-}
-
-// renumbering nodes in traversal order ensures that the node id is equal to the index
-// of the node in the final CDAWG
-void _renumber_nodes_in_cdawg_order(struct node * node, struct _dawg_context * context) {
-	node->visited = 1;
-	for (int i=0; i<LETTER_COUNT; i++) {
-		if (node->children[i]) {
-			context->edge_count++;
-			if (!node->children[i]->visited) {
-				node->children[i]->id = context->node_count++;
-			}
-		}
-	}
-	for (int i=0; i<LETTER_COUNT; i++) {
-		if (node->children[i] && !node->children[i]->visited) {
-			_renumber_nodes_in_cdawg_order(node->children[i], context);
 		}
 	}
 }
@@ -151,10 +129,10 @@ void _renumber_nodes_in_cdawg_order(struct node * node, struct _dawg_context * c
 //    sole node, then rewiring the parents of the other nodes to point to the sole node
 // 4. Repeat this process with nodes 1 level up from leaves, then 2 levels up etc until
 //    the root is reached
-int _convert_trie_to_dawg(struct node * root, struct _dawg_context * context) {
+int _convert_trie_to_dawg(struct vertex * root, struct _dawg_context * context) {
 	
 	// sort nodes by distance from leaf
-	struct node ** nodes_by_depth = calloc(context->node_count, sizeof(struct node*));
+	struct vertex ** nodes_by_depth = calloc(context->vertex_count, sizeof(struct vertex*));
 	set0(nodes_by_depth);
 	context->nodes = nodes_by_depth;
 	
@@ -166,10 +144,10 @@ int _convert_trie_to_dawg(struct node * root, struct _dawg_context * context) {
 		context->counts[i] = 0;
 	}
 	_collect_nodes_by_leaf_distance(root, context);
-	assert(context->offsets[15] == context->node_count - 1); // -1 because we don't collect the root node
+	assert(context->offsets[15] == context->vertex_count - 1); // -1 because we don't collect the root node
 	
-	int table_size = context->node_count * 1.5;
-	struct node ** hash_table = calloc(table_size, sizeof(struct node*));
+	int table_size = context->vertex_count * 1.5;
+	struct vertex ** hash_table = calloc(table_size, sizeof(struct vertex*));
 	
 	int merged = 0;
 	
@@ -178,10 +156,10 @@ int _convert_trie_to_dawg(struct node * root, struct _dawg_context * context) {
 		int from = i == 0 ? 0 : context->offsets[i-1];
 		int to = context->offsets[i];
 		for (int j=from; j<to; j++) {
-			struct node * node = context->nodes[j];
+			struct vertex * node = context->nodes[j];
 			
 			// find node sole node, if one exists already
-			struct node * sole_node = 0;
+			struct vertex * sole_node = 0;
 			int pos = node->hashcode % table_size;
 			int tmp = 0;
 			while (hash_table[pos]) {
@@ -195,10 +173,11 @@ int _convert_trie_to_dawg(struct node * root, struct _dawg_context * context) {
 			if (sole_node) {
 				// merge this node with the sole node
 				assert(node != sole_node);
-				assert(node->trie_parent->children[node->value] == node);
-				node->trie_parent->children[node->value] = sole_node;
+				assert(node->trie_parent->edges[node->value] == node);
+				node->trie_parent->edges[node->value] = sole_node;
 				_calculate_hashcode(node->trie_parent);
 				free(node);
+				context->nodes[j] = 0;
 				merged++;
 			} else {
 				// consider this the sole node
@@ -207,9 +186,17 @@ int _convert_trie_to_dawg(struct node * root, struct _dawg_context * context) {
 		}
 	}
 	
-	context->node_count = 1;
-	context->edge_count = 1;
-	_renumber_nodes_in_cdawg_order(root, context);
+	// renumber vertices with ids that decease further away from leaves. This ensures
+	// that no vertex will have an ID higher than any of its parents
+	int original_vertex_count = context->vertex_count;
+	context->vertex_count = 1;
+	context->edge_count = root->edge_count;
+	for (int i=original_vertex_count-1; i>=0; i--) {
+		if (context->nodes[i]) {
+			context->nodes[i]->id = context->vertex_count++;
+			context->edge_count += context->nodes[i]->edge_count;
+		}
+	}
 	
 	free(hash_table);
 	free(nodes_by_depth);
@@ -229,7 +216,7 @@ struct dawg * dawg_from_word_file(FILE *dict) {
 	char word[256];
 	set0(word);
 	
-	struct node * root = _new_node(0, 0, &context);
+	struct vertex * root = _new_node(0, 0, &context);
 	int lineNo = 0;
 	while (fgets(word, sizeof(word), dict)) {
 		if (word[strlen(word) - 1] != '\n' && !feof(dict)) { // word was too long
@@ -257,19 +244,20 @@ struct dawg * dawg_from_word_file(FILE *dict) {
 		_add_word_to_dawg(root, word, last_word, &context);
 	}
 	
-	fprintf(stderr, "Created trie with %d vertices and %d edges\n", context.node_count, context.edge_count);
+	fprintf(stderr, "Created trie with %d vertices/edges\n", context.vertex_count);
 	
-	int trie_edge_count = context.edge_count;
+	int trie_node_count = context.vertex_count;
 	_convert_trie_to_dawg(root, &context);
 	
-	fprintf(stderr, "Converted to DAWG with %d vertices and %d edges, eliminating %d%% of edges\n", context.node_count, context.edge_count, 100 - ((context.edge_count * 100) / trie_edge_count));
+	fprintf(stderr, "Converted to DAWG with %d vertices (reduction of %d%%) and %d edges (reduction of %d%%)\n",
+			context.vertex_count, 100 - ((context.vertex_count * 100) / trie_node_count),
+			context.edge_count, 100 - ((context.edge_count * 100) / trie_node_count));
 	
 	struct dawg * dawg = calloc(1, sizeof(struct dawg *));
-	dawg->node_count = context.node_count;
+	dawg->node_count = context.vertex_count;
 	dawg->root = root;
 	
 	return dawg;
-	
 }
 
 
@@ -277,98 +265,199 @@ struct dawg * dawg_from_word_file(FILE *dict) {
 // WORD FILE GENERATION
 //
 
-
-void _do_word_file_from_dawg(struct node * node, FILE * out, char * acc, int depth) {
+void _do_print_word_file(struct vertex * node, FILE * out, char * acc, int depth) {
 	assert(depth < WORD_BUFF_SIZE);
 	if (node->is_word) {
 		fprintf(out, "%s\n", acc);
 	}
 	for (int i=0; i<LETTER_COUNT; i++) {
-		if (node->children[i]) {
+		if (node->edges[i]) {
 			acc[depth] = index_to_char(i);
-			_do_word_file_from_dawg(node->children[i], out, acc, depth+1);
+			_do_print_word_file(node->edges[i], out, acc, depth+1);
 		}
 		acc[depth] = '\0';
 	}
 }
 
-void word_file_from_dawg(struct dawg * dawg, FILE * out) {
+void print_word_file(struct vertex * root, FILE * out) {
 	char acc[WORD_BUFF_SIZE];
 	memset(&acc, 0, sizeof(acc));
-	_do_word_file_from_dawg(dawg->root, out, acc, 0);
+	_do_print_word_file(root, out, acc, 0);
 }
 
+//
+// BINARY FILE GENERATION
+//
 
+// write a dawg file. Each vertex is represented simply as a list of edges. Each edge is
+// a 32 bit integer, with a couple of flags, a value and a pointer to the following vertex.
 //
-// CDAWG FILE GENERATION
+// interpretation
+//
+// bit 0: word flag. If 1, this node represents the last character of a word.
+// bit 1: last sibling flag. If 1, this edge is the last edge in the vertex
+// bits 3-7: A 5 bit integer containing the value of the edge
+// bits 8-31: a 24 bit integer containing an offset from the start of the binary
+//            file to the following vertex, or 0 if the following vertex has no edges
 //
 
-// write a cdawg file. Each node is a single byte, optionally followed by a variable
-// length pointer to the first child.
-//
-// single byte interpretation
-//
-// The first byte is as follows (bit 1 == most significant bit):
-// bit 1: pointer flag. If 1, this byte is followed by a pointer to the first child.
-//        If 0, the first child is directly after this node in the next byte position.
-// bit 2: word flag. If 1, this node represents the last character of a word.
-// bit 3: last sibling flag. If 1, this node is the last in a set of siblings. If 0
-//        there is another sibling after this node.
-// bits 4-7: A 5 bit integer containing the value of the
-//
-// pointer interpretation:
-//
-// pointers are base 128 bit varints, as used by Google protocol buffers.
-// http://code.google.com/apis/protocolbuffers/docs/encoding.html#varints
-// A pointer with a value of 0 indicates that the node has no children
-//
-void _do_write_cdawg(struct node * node, FILE * out, int * counter) {
-	assert(node->id == (*counter)++);
-	if (node->visited) {
-		return;
-	}
-	node->visited = 1;
-	
+void _flatten_vertices(struct vertex * node, struct vertex ** nodes, int node_count) {
+	assert(node->id < node_count);
+	nodes[node->id] = node;
 	for (int i=0; i<LETTER_COUNT; i++) {
-		if (node->children[i]) {
-			//fprintf(out, "\tn%d -> n%d;\n", node->id, node->children[i]->id);
-			_do_write_cdawg(node->children[i], out, counter);
+		if (node->edges[i]) {
+			_flatten_vertices(node->edges[i], nodes, node_count);
 		}
 	}
 }
 
-void _collect_nodes_in_cdawg_order(struct node * node, struct node ** nodes) {
-	if (node->visited) return;
-	node->visited = 1;
-	for (int i=0; i<LETTER_COUNT; i++) {
-		if (node->children[i] && !node->children[i]->visited) {
-			// process
-		}
-	}
-	for (int i=0; i<LETTER_COUNT; i++) {
-		if (node->children[i] && !node->children[i]->visited) {
-			_collect_nodes_in_cdawg_order(node, nodes);
-		}
-	}
-}
+#define MAX_VERTEX_BINARY_SIZE 4
 
-// write a CDAWG to a file
-void write_cdawg(struct dawg * dawg, FILE * out) {
+
+// write a DAWG to a file
+void binary_file_from_dawg(struct dawg * dawg, FILE * out, int text) {
+	assert(out);
 	unvisit_all_nodes(dawg->root);
 	
-//	struct node ** nodes = calloc(dawg->node_count, sizeof(struct node *));
+	int node_count = dawg->node_count;
 	
-//	int counter = 0;
-//	_do_write_cdawg(dawg->root, out, &counter);
+	struct vertex ** nodes = calloc(node_count, sizeof(struct vertex *));
 	
-//	free(nodes);
+	_flatten_vertices(dawg->root, nodes, node_count);	
+	
+	int file_offset = 0;
+	for (int i=0; i<node_count; i++) {
+		nodes[i]->file_offset = file_offset;
+		file_offset += nodes[i]->edge_count;
+	}
+	
+	if (text) fprintf(out, "int DAWG_TABLE[] = {");
+	for (int i=0; i<node_count; i++) {
+		struct vertex * node = nodes[i];
+		assert(node);
+		if (node->edge_count == 0) {
+			continue;
+		}
+		if (text) fprintf(out, "\n\t/* DAWG_TABLE[%d], vertex #%d */\n\t", node->file_offset, node->id);
+		int children = 0;
+		for (int j=0; j<LETTER_COUNT; j++) {
+			struct vertex * edge_to = node->edges[j];
+			if (edge_to) {
+				children++;
+				unsigned int edge_int = 0;
+				if (edge_to->is_word) {
+					edge_int |= WORD_BIT;
+				}
+				if (children == node->edge_count) {
+					edge_int |= LAST_SIBLING_BIT;
+				}
+				assert(edge_to->value <= 0x1F); // value fits in 5 bits
+				edge_int |= edge_to->value << 24; // store value in bits 4-8
+				if (edge_to->edge_count) {
+					assert(edge_to->file_offset <= 0x00FFFFFF); // offset fits in 24 bits
+					edge_int |= edge_to->file_offset; // store offset in bits 9-32;
+				}
+				if (text) {
+					fprintf(out, "0x%08X, ", edge_int);
+				} else {
+					fwrite(&edge_int, sizeof(edge_int), 1, out);
+				}
+
+			}
+		}
+	}
+	if (text) fprintf(out, "\n};");
+	
+	//	_do_write_cdawg(dawg->root, out, &counter);
+	
+	free(nodes);
+}
+
+//
+// BINARY FILE DECOMPILATION
+//
+
+// recursive function to add binary nodes into a dawg structure
+
+void _add_binary_node_to_dawg(unsigned int * binary_node, int offset, struct vertex * node, int total_read) {
+	unsigned int i=0, edge;
+	do {
+		assert(offset + i < total_read);
+		edge = binary_node[offset + i];
+		unsigned char value = edge_value(edge);
+		assert(!node->edges[value]);
+		struct vertex * new_node = calloc(1, sizeof(struct vertex));
+		new_node->value = value;
+		new_node->is_word = is_word_edge(edge);
+		node->edges[value] = new_node;
+		int child_offset = edge_offset(edge);
+		if (child_offset) {
+			_add_binary_node_to_dawg(binary_node, child_offset, node->edges[value], total_read);
+		}
+		i++;
+	} while (!is_last_edge(edge));
+}
+
+struct vertex * trie_from_binary_file(FILE * in) {
+	// copy file to buffer
+	int buffer_size = 256*256, total_read = 0;
+	unsigned int * buffer = malloc(buffer_size * sizeof(unsigned int));
+	do {
+		total_read += fread(buffer + total_read, sizeof(unsigned int), buffer_size - total_read, in);
+		if (total_read == buffer_size) {
+			buffer_size *= 2;
+			unsigned int * new_buffer = malloc(buffer_size * sizeof(unsigned int));
+			memcpy(new_buffer, buffer, total_read * sizeof(unsigned int));
+			free(buffer);
+			buffer = new_buffer;
+		}
+	} while (!feof(in));
+	/*
+	
+	unsigned int node_counter = 0, total_nodes;
+	struct vertex ** nodes = calloc(total_read, sizeof(struct vertex *));
+	struct vertex ** terminals = calloc(LETTER_COUNT, sizeof(struct vertex));
+	for (int i=0; i<total_read;) {
+		if (!nodes[i]) {
+			nodes[i] = calloc(1, sizeof(struct vertex));
+		}
+		total_nodes++;
+		struct vertex * node = nodes[i];
+		int edge;
+		do {
+			edge = buffer[i];
+			unsigned int offset = edge_offset(edge);
+			if (offset) {
+				if (!nodes[offset]) {
+					nodes[offset] = calloc(1, sizeof(struct vertex));
+					node_counter++;
+				}
+				node->edges[value] = nodes[offset];
+			}
+			unsigned char value = edge_value(edge);
+			assert(offset > total_nodes);
+			nodes[offset]->value = value;
+			i++;
+			if (i >= total_read) break;
+		} while (!is_last_edge(edge));
+	}
+	
+	struct dawg * dawg = calloc(1, sizeof(struct dawg));
+	dawg->root = nodes[0];
+	dawg->node_count = total_nodes;*/
+	
+	struct vertex * root = calloc(1, sizeof(struct vertex));
+
+	_add_binary_node_to_dawg(buffer, 0, root, total_read);
+		
+	return root;
 }
 
 //
 // GRAPH VISUALISATION
 //
 
-void _do_graphviz_from_dawg(struct node * node, FILE * out) {
+void _do_graphviz_from_dawg(struct vertex * node, FILE * out) {
 	if (node->visited) {
 		return;
 	}
@@ -377,21 +466,21 @@ void _do_graphviz_from_dawg(struct node * node, FILE * out) {
 	if (node->id == 0) {
 		fprintf(out, "\tn%d [label=\"root\", shape=Mdiamond];\n", node->id);
 	} else {
-		fprintf(out, "\tn%d [label=\"%c%s\"];\n", node->id, index_to_char(node->value), node->is_word ? " *" : "");
+		fprintf(out, "\tn%d [label=\"%d: %c%s\"];\n", node->id, node->id, index_to_char(node->value), node->is_word ? " *" : "");
 	}
 	
 	
 	for (int i=0; i<LETTER_COUNT; i++) {
-		if (node->children[i]) {
-			fprintf(out, "\tn%d -> n%d;\n", node->id, node->children[i]->id);
-			_do_graphviz_from_dawg(node->children[i], out);
+		if (node->edges[i]) {
+			fprintf(out, "\tn%d -> n%d;\n", node->id, node->edges[i]->id);
+			_do_graphviz_from_dawg(node->edges[i], out);
 		}
 	}
 }
 
 
 // output a graphviz descriptor for a DAWG
-void graphviz_from_node(struct node * root, FILE * out) {
+void graphviz_from_node(struct vertex * root, FILE * out) {
 	unvisit_all_nodes(root);
 	fprintf(out, "digraph G {\n");
 	_do_graphviz_from_dawg(root, out);

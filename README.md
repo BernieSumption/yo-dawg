@@ -9,4 +9,4 @@ This project consists of:
 
 * A compressed binary format for representing a DAWG in C
 * Functions for traversing the graph
-* A command line utility
+* A command line utility for compiling and decompiling the binary format, and dumping it to graphviz for debugging
